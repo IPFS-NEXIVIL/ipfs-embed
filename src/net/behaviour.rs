@@ -18,7 +18,10 @@ use libp2p::mdns::async_io::Behaviour as Mdns;
 use libp2p::mdns::tokio::Behaviour as Mdns;
 use libp2p::{
     core::ConnectedPoint,
-    gossipsub::{Gossipsub, GossipsubEvent, GossipsubMessage, IdentTopic, MessageAuthenticity},
+    gossipsub,
+    gossipsub::{
+        Event as GossipsubEvent, IdentTopic, Message as GossipsubMessage, MessageAuthenticity,
+    },
     identify,
     kad::{
         record::{store::MemoryStore, Key, Record},
@@ -26,10 +29,7 @@ use libp2p::{
         KademliaEvent, PeerRecord, ProgressStep, PutRecordOk, QueryResult, Quorum, K_VALUE,
     },
     mdns, ping,
-    swarm::{
-        behaviour::toggle::Toggle, AddressRecord, ConnectionError, ConnectionHandler,
-        IntoConnectionHandler, NetworkBehaviour,
-    },
+    swarm::{behaviour::toggle::Toggle, ConnectionError, ConnectionHandler, NetworkBehaviour},
     Multiaddr, PeerId,
 };
 use libp2p_bitswap::{Bitswap, BitswapEvent, BitswapStore};
@@ -106,7 +106,7 @@ pub struct NetworkBackendBehaviour<P: StoreParams> {
     ping: Toggle<ping::Behaviour>,
     identify: Toggle<identify::Behaviour>,
     bitswap: Toggle<Bitswap<P>>,
-    gossipsub: Toggle<Gossipsub>,
+    gossipsub: Toggle<gossipsub::Behaviour>,
     broadcast: Toggle<Broadcast>,
 }
 
@@ -321,12 +321,9 @@ impl<P: StoreParams> NetworkBackendBehaviour<P> {
         // automatically.
         let peer = event.peer;
         match event.result {
-            Ok(ping::Success::Ping { rtt }) => {
+            Ok(rtt) => {
                 //tracing::trace!("ping: rtt to {} is {} ms", peer, rtt.as_millis());
                 self.peers.set_rtt(&peer, Some(rtt));
-            }
-            Ok(ping::Success::Pong) => {
-                //tracing::trace!("ping: pong from {}", peer);
             }
             Err(ping::Failure::Timeout) => {
                 tracing::debug!("ping: timeout to {}", peer);
@@ -356,7 +353,7 @@ impl<P: StoreParams> NetworkBackendBehaviour<P> {
 
 #[derive(Debug, Error)]
 #[error("{0:?}")]
-pub struct GossipsubPublishError(pub libp2p::gossipsub::error::PublishError);
+pub struct GossipsubPublishError(pub gossipsub::PublishError);
 
 impl<P: StoreParams> NetworkBackendBehaviour<P> {
     pub fn inject_gossip_event(
@@ -451,7 +448,7 @@ impl<P: StoreParams> NetworkBackendBehaviour<P> {
         let node_name = config.node_name.clone();
         let peer_id = node_key.public().to_peer_id();
         let mdns = if let Some(config) = config.mdns.take() {
-            Some(Mdns::new(config)?)
+            Some(Mdns::new(config, peer_id.clone())?)
         } else {
             None
         };
@@ -470,8 +467,9 @@ impl<P: StoreParams> NetworkBackendBehaviour<P> {
             None
         };
         let gossipsub = if let Some(config) = config.gossipsub.take() {
-            let gossipsub = Gossipsub::new(MessageAuthenticity::Signed(node_key), config)
-                .map_err(|err| anyhow::anyhow!("{}", err))?;
+            let gossipsub =
+                gossipsub::Behaviour::new(MessageAuthenticity::Signed(node_key), config)
+                    .map_err(|err| anyhow::anyhow!("{}", err))?;
             Some(gossipsub)
         } else {
             None
@@ -734,7 +732,7 @@ impl<P: StoreParams> NetworkBackendBehaviour<P> {
     }
 
     pub fn publish(&mut self, topic: &str, msg: Vec<u8>) -> Result<()> {
-        use libp2p::gossipsub::error::PublishError;
+        use gossipsub::PublishError;
         if let Some(gossipsub) = self.gossipsub.as_mut() {
             let gossip_topic = IdentTopic::new(topic);
             match gossipsub.publish(gossip_topic, msg) {

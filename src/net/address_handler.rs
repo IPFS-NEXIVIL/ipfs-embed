@@ -3,7 +3,7 @@ use libp2p::{
     multiaddr::Protocol,
     swarm::{
         handler::{InboundUpgradeSend, OutboundUpgradeSend},
-        ConnectionHandler, IntoConnectionHandler, KeepAlive, SubstreamProtocol,
+        ConnectionHandler, KeepAlive, SubstreamProtocol,
     },
     Multiaddr, PeerId,
 };

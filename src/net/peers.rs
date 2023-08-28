@@ -18,19 +18,15 @@ use lazy_static::lazy_static;
 use libp2p::{
     core::{
         connection::ConnectedPoint,
-        either::EitherError,
         transport::{timeout::TransportTimeoutError, ListenerId},
-        UpgradeError,
     },
     dns::DnsErr,
     identify,
     multiaddr::Protocol,
-    noise::NoiseError,
     swarm::{
         derive_prelude::FromSwarm,
         dial_opts::{DialOpts, PeerCondition},
-        AddressRecord, ConnectionError, DialError, NetworkBehaviour, NetworkBehaviourAction,
-        PollParameters,
+        ConnectionError, DialError, NetworkBehaviour, PollParameters, ToSwarm,
     },
     Multiaddr, PeerId, TransportError,
 };
@@ -202,10 +198,8 @@ pub struct AddressBook {
     external: Writer<Vec<AddressRecord>>,
     refresh_external: bool,
     event_stream: Vec<mpsc::UnboundedSender<Event>>,
-    pub(crate) actions: VecDeque<NetworkBehaviourAction<void::Void, IntoAddressHandler>>,
-    deferred: FuturesUnordered<
-        BoxFuture<'static, NetworkBehaviourAction<void::Void, IntoAddressHandler>>,
-    >,
+    pub(crate) actions: VecDeque<ToSwarm<void::Void, IntoAddressHandler>>,
+    deferred: FuturesUnordered<BoxFuture<'static, ToSwarm<void::Void, IntoAddressHandler>>>,
 }
 
 impl AddressBook {
@@ -244,7 +238,7 @@ impl AddressBook {
         }
         tracing::debug!("request dialing {}", peer);
         let handler = self.new_handler();
-        self.actions.push_back(NetworkBehaviourAction::Dial {
+        self.actions.push_back(ToSwarm::Dial {
             opts: DialOpts::peer_id(*peer).build(),
             handler,
         });
@@ -269,7 +263,7 @@ impl AddressBook {
             Some((target.into_owned(), SIM_OPEN_RETRIES + 1)),
             self.keep_alive,
         );
-        self.actions.push_back(NetworkBehaviourAction::Dial {
+        self.actions.push_back(ToSwarm::Dial {
             opts: DialOpts::peer_id(*peer).addresses(vec![addr]).build(),
             handler,
         });
@@ -306,7 +300,7 @@ impl AddressBook {
                 && !info.connections.contains_key(&addr_full);
             drop(peers);
             if result {
-                self.actions.push_back(NetworkBehaviourAction::Dial {
+                self.actions.push_back(ToSwarm::Dial {
                     opts: DialOpts::peer_id(*peer)
                         .condition(PeerCondition::Always)
                         .addresses(vec![address])
@@ -543,7 +537,7 @@ impl AddressBook {
                         // the question
                         info.ingest_address(addr, AddressSource::Candidate);
                     } else {
-                        self.actions.push_back(NetworkBehaviourAction::Dial {
+                        self.actions.push_back(ToSwarm::Dial {
                             opts: DialOpts::peer_id(*peer_id)
                                 .condition(PeerCondition::Always)
                                 .addresses(vec![tcp])
@@ -610,7 +604,7 @@ impl AddressBook {
                     if retries == SIM_OPEN_RETRIES + 1 {
                         tracing::debug!("scheduling redial after presumed TCP simultaneous open");
                     }
-                    let action = NetworkBehaviourAction::Dial {
+                    let action = ToSwarm::Dial {
                         opts: DialOpts::peer_id(peer_id)
                             .addresses(vec![addr.clone()])
                             .build(),
@@ -636,7 +630,7 @@ impl AddressBook {
                     // handshake, which yields this particular error
                     if is_sim_open {
                         tracing::debug!("scheduling redial after presumed TCP simultaneous open");
-                        deferred.push(NetworkBehaviourAction::Dial {
+                        deferred.push(ToSwarm::Dial {
                             opts: DialOpts::peer_id(peer_id)
                                 .addresses(vec![addr.clone()])
                                 .build(),
@@ -737,25 +731,58 @@ impl Stream for SwarmEvents {
 
 impl NetworkBehaviour for AddressBook {
     type ConnectionHandler = IntoAddressHandler;
-    type OutEvent = void::Void;
+    // type OutEvent = void::Void;
 
-    fn new_handler(&mut self) -> Self::ConnectionHandler {
-        IntoAddressHandler(None, self.keep_alive)
+    // fn new_handler(&mut self) -> Self::ConnectionHandler {
+    //     IntoAddressHandler(None, self.keep_alive)
+    // }
+
+    // fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
+    //     if let Some(info) = self.peers.read().get(peer_id) {
+    //         info.confirmed_addresses().cloned().collect()
+    //     } else {
+    //         vec![]
+    //     }
+    // }
+    
+    fn handle_pending_inbound_connection(
+        &mut self,
+        _connection_id: libp2p::swarm::ConnectionId,
+        _local_addr: &Multiaddr,
+        _remote_addr: &Multiaddr,
+    ) -> std::result::Result<(), libp2p::swarm::ConnectionDenied> {
     }
 
-    fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
-        if let Some(info) = self.peers.read().get(peer_id) {
-            info.confirmed_addresses().cloned().collect()
-        } else {
-            vec![]
-        }
+    fn handle_established_inbound_connection(
+        &mut self,
+        _connection_id: libp2p::swarm::ConnectionId,
+        peer: PeerId,
+        local_addr: &Multiaddr,
+        remote_addr: &Multiaddr,
+    ) -> std::result::Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
+    }
+    fn handle_pending_outbound_connection(
+        &mut self,
+        _connection_id: libp2p::swarm::ConnectionId,
+        _maybe_peer: Option<PeerId>,
+        _addresses: &[Multiaddr],
+        _effective_role: libp2p::core::Endpoint,
+    ) -> std::result::Result<Vec<Multiaddr>, libp2p::swarm::ConnectionDenied> {
+    }
+    fn handle_established_outbound_connection(
+        &mut self,
+        _connection_id: libp2p::swarm::ConnectionId,
+        peer: PeerId,
+        addr: &Multiaddr,
+        role_override: libp2p::core::Endpoint,
+    ) -> std::result::Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
     }
 
     fn poll(
         &mut self,
         cx: &mut Context,
         params: &mut impl PollParameters,
-    ) -> Poll<NetworkBehaviourAction<void::Void, IntoAddressHandler>> {
+    ) -> Poll<ToSwarm<void::Void, IntoAddressHandler>> {
         if self.refresh_external {
             self.refresh_external = false;
             *self.external.write() = params.external_addresses().collect();

@@ -47,7 +47,7 @@ trust-dns-resolver = "0.22.0"
 void = "1.0.2"
 
 [dependencies.libp2p]
-version = "0.50.0"
+version = "0.52"
 features = [
     "dns",
     "gossipsub",
@@ -55,7 +55,7 @@ features = [
     "kad",
     "macros",
     "mdns",
-    "mplex",
+    # "mplex",
     "noise",
     "ping",
     "pnet",
